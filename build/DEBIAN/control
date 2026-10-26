@@ -1,6 +1,6 @@
 Package: com.777qwq.triggrzh
 Name: Triggr汉化+扩展
-Version: 1.8
+Version: 1.9
 Architecture: iphoneos-arm64
 Description: Triggr 2.0.X 简体中文汉化与扩展动作二合一包。
  【汉化】运行时替换显示层文本，不修改 Triggr 本体。

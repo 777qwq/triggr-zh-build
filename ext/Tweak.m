@@ -282,7 +282,7 @@ static void TAInit(void) {
     // TriggrApp (2.0 app is a shell that loads Triggr.bundle) and Settings.app:
     // hook the picker when Triggr.bundle loads (event-driven, no polling).
     if (strstr(getprogname(), "Preferences") || strstr(getprogname(), "TriggrApp")) {
-        TALog([NSString stringWithFormat:@"ctor: %@ path", getprogname()]);
+        TALog([NSString stringWithFormat:@"ctor: %s path", getprogname()]);
         dispatch_async(dispatch_get_main_queue(), ^{
             TASwizzlePickerRowTap(); // in case the panel is already open
             [[NSNotificationCenter defaultCenter] addObserverForName:NSBundleDidLoadNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
