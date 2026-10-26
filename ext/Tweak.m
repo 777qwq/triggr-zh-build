@@ -194,9 +194,10 @@ static void TAPruneStaleRegistrations(void) {
 
 // ---- picker row-tap hook: tapping 密码解锁 in the action picker opens the
 // cn4.9 config dialog (pre-filled, 取消/保存/移除), like the cn4.9 settings row.
+static IMP tgOrigDidSelect = NULL;
+
 static void TAPickerDidSelectIMP(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    // original (exchanged) implementation
-    ((void (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(self, @selector(tg_didSelectRowAtIndexPath:), tv, ip);
+    if (tgOrigDidSelect) ((void (*)(id, SEL, UITableView *, NSIndexPath *))tgOrigDidSelect)(self, _cmd, tv, ip);
     @try {
         UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
         TALog([NSString stringWithFormat:@"didSelect ip=%@ cell=%@ text=%@ detail=%@",
@@ -226,11 +227,16 @@ static void TASwizzlePickerRowTap(void) {
     SEL orig = @selector(tableView:didSelectRowAtIndexPath:);
     Method m1 = class_getInstanceMethod(picker, orig);
     if (!m1) { TALog([NSString stringWithFormat:@"swizzle: class=%@ no didSelect", picker]); return; }
-    SEL ours = @selector(tg_didSelectRowAtIndexPath:);
-    if (class_getInstanceMethod(picker, ours)) { TALog(@"swizzle: already swizzled"); return; }
-    if (!class_addMethod(picker, ours, (IMP)TAPickerDidSelectIMP, "v@:@@")) { TALog(@"swizzle: addMethod failed"); return; }
-    Method m2 = class_getInstanceMethod(picker, ours);
-    if (m1 && m2) { method_exchangeImplementations(m1, m2); TALog(@"swizzle: OK"); }
+    if (tgOrigDidSelect) { TALog(@"swizzle: already hooked"); return; }
+    tgOrigDidSelect = method_getImplementation(m1);
+    // Override on the SUBCLASS only. Never method_exchangeImplementations here:
+    // if the picker inherits didSelect from UITableViewController, swapping the
+    // Method swaps it for EVERY table view in the process (1.7 crash).
+    if (!class_addMethod(picker, orig, (IMP)TAPickerDidSelectIMP, "v@:@@")) {
+        // picker implements it locally; replace just this class's IMP
+        method_setImplementation(m1, (IMP)TAPickerDidSelectIMP);
+    }
+    TALog(@"swizzle: OK (subclass override)");
 }
 
 static void TARegister(Class infoClass, NSString *identifier, NSString *title, NSString *symbol, void (^handler)(id ctx)) {
