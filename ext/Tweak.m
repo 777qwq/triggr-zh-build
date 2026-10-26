@@ -197,28 +197,31 @@ static void TAPruneStaleRegistrations(void) {
 static IMP tgOrigDidSelect = NULL;
 
 static void TAPickerDidSelectIMP(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (tgOrigDidSelect) ((void (*)(id, SEL, UITableView *, NSIndexPath *))tgOrigDidSelect)(self, _cmd, tv, ip);
+    // Capture the cell BEFORE the original runs — orig may navigate away and
+    // the row disappears (1.9 log: cell=nil when read after orig).
+    NSString *hit = nil;
     @try {
         UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-        TALog([NSString stringWithFormat:@"didSelect ip=%@ cell=%@ text=%@ detail=%@",
+        TALog([NSString stringWithFormat:@"didSelect(pre) ip=%@ cell=%@ text=%@ detail=%@",
               ip, cell ? NSStringFromClass(cell.class) : @"nil",
               cell.textLabel.text, cell.detailTextLabel.text]);
-        if (!cell) return;
-        __block NSString *text = nil;
-        // custom cells possible: sweep labels in the cell
-        NSMutableArray *stack = [NSMutableArray arrayWithObject:cell];
-        while (stack.count && !text) {
-            UIView *v = stack.lastObject; [stack removeLastObject];
-            for (UIView *sub in v.subviews) [stack addObject:sub];
-            if ([v isKindOfClass:[UILabel class]]) {
-                UILabel *l = (UILabel *)v;
-                TALog([NSString stringWithFormat:@"  label=%@", l.text]);
-                if ([l.text isEqualToString:@"密码解锁"]) { text = l.text; break; }
+        if (cell) {
+            NSMutableArray *stack = [NSMutableArray arrayWithObject:cell];
+            while (stack.count && !hit) {
+                UIView *v = stack.lastObject; [stack removeLastObject];
+                for (UIView *sub in v.subviews) [stack addObject:sub];
+                if ([v isKindOfClass:[UILabel class]]) {
+                    UILabel *l = (UILabel *)v;
+                    if ([l.text isEqualToString:@"密码解锁"]) hit = l.text;
+                }
             }
         }
-        TALog([NSString stringWithFormat:@"  match=%@", text ?: @"<none>"]);
-        if (text) TAPromptPassword();
-    } @catch (NSException *e) { TALog([NSString stringWithFormat:@"didSelect EXC %@", e]); }
+        TALog([NSString stringWithFormat:@"  pre-match=%@", hit ?: @"<none>"]);
+    } @catch (NSException *e) { TALog([NSString stringWithFormat:@"pre EXC %@", e]); }
+
+    if (tgOrigDidSelect) ((void (*)(id, SEL, UITableView *, NSIndexPath *))tgOrigDidSelect)(self, _cmd, tv, ip);
+
+    if (hit) TAPromptPassword();
 }
 
 static void TASwizzlePickerRowTap(void) {
