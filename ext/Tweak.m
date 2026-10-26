@@ -201,10 +201,11 @@ static void TAPickerDidSelectIMP(id self, SEL _cmd, UITableView *tv, NSIndexPath
 
 static void TASwizzlePickerRowTap(void) {
     Class picker = NSClassFromString(@"TGActionPickerController");
-    if (!picker) return;
+    if (!picker) return; // Triggr.bundle not loaded yet (loads inside Settings.app)
     SEL orig = @selector(tableView:didSelectRowAtIndexPath:);
-    if (!class_getInstanceMethod(picker, orig)) return; // picker not a table delegate: skip silently
+    if (!class_getInstanceMethod(picker, orig)) return;
     SEL ours = @selector(tg_didSelectRowAtIndexPath:);
+    if (class_getInstanceMethod(picker, ours)) return; // already swizzled
     if (!class_addMethod(picker, ours, (IMP)TAPickerDidSelectIMP, "v@:@@")) return;
     Method m1 = class_getInstanceMethod(picker, orig);
     Method m2 = class_getInstanceMethod(picker, ours);
@@ -240,14 +241,28 @@ static void TARegisterAll(void) {
 
 __attribute__((constructor))
 static void TAInit(void) {
-    if (!strstr(getprogname(), "SpringBoard")) return;
-    // Triggr dylib may load after ours; retry on main queue until libtriggr is up.
-    __block int tries = 0;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        TAPruneStaleRegistrations();
-        TARegisterAll();
-        TASwizzlePickerRowTap();
-        if (++tries < 10 && !NSClassFromString(@"TGActionInfo"))
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ TARegisterAll(); });
-    });
+    if (strstr(getprogname(), "SpringBoard")) {
+        // Triggr dylib may load after ours; retry on main queue until libtriggr is up.
+        __block int tries = 0;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            TAPruneStaleRegistrations();
+            TARegisterAll();
+            if (++tries < 10 && !NSClassFromString(@"TGActionInfo"))
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ TARegisterAll(); });
+        });
+        return;
+    }
+    // Settings.app: hook the picker when Triggr.bundle loads (event-driven, no polling).
+    if (strstr(getprogname(), "Preferences")) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            TASwizzlePickerRowTap(); // in case the panel is already open
+            [[NSNotificationCenter defaultCenter] addObserverForName:NSBundleDidLoadNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+                NSString *path = note.userInfo[@"NSLoadedClasses"] ? nil : nil;
+                (void)path;
+                id bundle = note.object;
+                NSString *bundlePath = [bundle isKindOfClass:[NSBundle class]] ? [(NSBundle *)bundle bundlePath] : nil;
+                if (bundlePath.length && [bundlePath containsString:@"Triggr"]) TASwizzlePickerRowTap();
+            }];
+        });
+    }
 }
