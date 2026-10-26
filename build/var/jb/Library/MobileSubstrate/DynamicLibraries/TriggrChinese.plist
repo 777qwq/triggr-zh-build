@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Filter</key>
+	<dict>
+		<key>Bundles</key>
+		<array>
+			<string>com.johndie.triggr.app</string>
+			<string>com.johndie.TriggrApp</string>
+			<string>com.johndie.triggr</string>
+			<string>com.apple.Preferences</string>
+			<string>com.apple.springboard</string>
+		</array>
+		<key>Executables</key>
+		<array>
+			<string>TriggrApp</string>
+		</array>
+	</dict>
+</dict>
+</plist>
