@@ -11,11 +11,27 @@
 #import <CoreHaptics/CoreHaptics.h>
 #import <dlfcn.h>
 #import <notify.h>
-#import <sys/stat.h>
+#import <fcntl.h>
+#import <unistd.h>
 #import <string.h>
+#import <sys/stat.h>
 
 #define TA_GROUP    @"扩展动作"
 #define TA_BACK_NOT "cn.triggr2.back"
+
+// ---- one-line file log (diagnostics; view at /var/tmp/ta.log) ----
+static void TALog(NSString *line) {
+    if (!line) return;
+    @try {
+        NSMutableString *out = [NSMutableString stringWithFormat:@"[%@] %@\n", [NSDate date], line];
+        int fd = open("/var/tmp/ta.log", O_WRONLY | O_CREAT | O_APPEND, 0777);
+        if (fd >= 0) {
+            const char *c = out.UTF8String;
+            if (c) write(fd, c, strlen(c));
+            close(fd);
+        }
+    } @catch (NSException *e) { }
+}
 
 static id TAShared(NSString *cls) {
     Class c = NSClassFromString(cls);
@@ -183,6 +199,9 @@ static void TAPickerDidSelectIMP(id self, SEL _cmd, UITableView *tv, NSIndexPath
     ((void (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(self, @selector(tg_didSelectRowAtIndexPath:), tv, ip);
     @try {
         UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+        TALog([NSString stringWithFormat:@"didSelect ip=%@ cell=%@ text=%@ detail=%@",
+              ip, cell ? NSStringFromClass(cell.class) : @"nil",
+              cell.textLabel.text, cell.detailTextLabel.text]);
         if (!cell) return;
         __block NSString *text = nil;
         // custom cells possible: sweep labels in the cell
@@ -192,24 +211,26 @@ static void TAPickerDidSelectIMP(id self, SEL _cmd, UITableView *tv, NSIndexPath
             for (UIView *sub in v.subviews) [stack addObject:sub];
             if ([v isKindOfClass:[UILabel class]]) {
                 UILabel *l = (UILabel *)v;
+                TALog([NSString stringWithFormat:@"  label=%@", l.text]);
                 if ([l.text isEqualToString:@"密码解锁"]) { text = l.text; break; }
             }
         }
+        TALog([NSString stringWithFormat:@"  match=%@", text ?: @"<none>"]);
         if (text) TAPromptPassword();
-    } @catch (NSException *e) { }
+    } @catch (NSException *e) { TALog([NSString stringWithFormat:@"didSelect EXC %@", e]); }
 }
 
 static void TASwizzlePickerRowTap(void) {
     Class picker = NSClassFromString(@"TGActionPickerController");
-    if (!picker) return; // Triggr.bundle not loaded yet (loads inside Settings.app)
+    if (!picker) { TALog(@"swizzle: TGActionPickerController nil"); return; }
     SEL orig = @selector(tableView:didSelectRowAtIndexPath:);
-    if (!class_getInstanceMethod(picker, orig)) return;
-    SEL ours = @selector(tg_didSelectRowAtIndexPath:);
-    if (class_getInstanceMethod(picker, ours)) return; // already swizzled
-    if (!class_addMethod(picker, ours, (IMP)TAPickerDidSelectIMP, "v@:@@")) return;
     Method m1 = class_getInstanceMethod(picker, orig);
+    if (!m1) { TALog([NSString stringWithFormat:@"swizzle: class=%@ no didSelect", picker]); return; }
+    SEL ours = @selector(tg_didSelectRowAtIndexPath:);
+    if (class_getInstanceMethod(picker, ours)) { TALog(@"swizzle: already swizzled"); return; }
+    if (!class_addMethod(picker, ours, (IMP)TAPickerDidSelectIMP, "v@:@@")) { TALog(@"swizzle: addMethod failed"); return; }
     Method m2 = class_getInstanceMethod(picker, ours);
-    if (m1 && m2) method_exchangeImplementations(m1, m2);
+    if (m1 && m2) { method_exchangeImplementations(m1, m2); TALog(@"swizzle: OK"); }
 }
 
 static void TARegister(Class infoClass, NSString *identifier, NSString *title, NSString *symbol, void (^handler)(id ctx)) {
@@ -254,13 +275,13 @@ static void TAInit(void) {
     }
     // Settings.app: hook the picker when Triggr.bundle loads (event-driven, no polling).
     if (strstr(getprogname(), "Preferences")) {
+        TALog(@"ctor: Preferences path");
         dispatch_async(dispatch_get_main_queue(), ^{
             TASwizzlePickerRowTap(); // in case the panel is already open
             [[NSNotificationCenter defaultCenter] addObserverForName:NSBundleDidLoadNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
-                NSString *path = note.userInfo[@"NSLoadedClasses"] ? nil : nil;
-                (void)path;
                 id bundle = note.object;
                 NSString *bundlePath = [bundle isKindOfClass:[NSBundle class]] ? [(NSBundle *)bundle bundlePath] : nil;
+                TALog([NSString stringWithFormat:@"bundleDidLoad %@", bundlePath]);
                 if (bundlePath.length && [bundlePath containsString:@"Triggr"]) TASwizzlePickerRowTap();
             }];
         });
