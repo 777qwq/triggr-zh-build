@@ -109,11 +109,15 @@ static void TAPromptPassword(void) {
     });
 }
 
-// cn4.9 semantics: the trigger ALWAYS unlocks with the stored passcode
-// (screen on or off, never shows UI). Popup only when no password yet.
+// cn4 semantics, copied from TGPerform: everything runs on the MAIN queue
+// (libtriggr's handler thread is not guaranteed main; the SB wake/unlock
+// calls silently fail off-main). Trigger = always unlock; popup only when
+// no password has been set yet.
 static void TAUnlockAction(void) {
-    NSString *pw = TALoadPassword();
-    if (pw.length) TAUnlockDevice(pw); else TAPromptPassword();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *pw = TALoadPassword();
+        if (pw.length) TAUnlockDevice(pw); else TAPromptPassword();
+    });
 }
 
 // [cn4.9 verified] transient haptic (触觉反馈 = light). Main thread only.
@@ -190,7 +194,7 @@ static void TARegisterAll(void) {
     TARegister(infoClass, @"cn.actions.wxscan",     @"微信扫一扫", @"qrcode.viewfinder", ^(id c) { TAOpenURL(@"weixin://widget/scan"); });
     TARegister(infoClass, @"cn.actions.wxpaycode",  @"微信收付款", @"qrcode",            ^(id c) { TAOpenURL(@"weixin://widget/pay"); });
     TARegister(infoClass, @"cn.actions.aliscan",    @"支付宝扫一扫", @"qrcode.viewfinder", ^(id c) { TAOpenURL(@"alipay3dtouch://platformapi/startapp?appId=10000007&showOthers=YES&sourceId=3dtouch"); });
-    TARegister(infoClass, @"cn.actions.alipaycode", @"支付宝付款码", @"qrcode",            ^(id c) { TAOpenURL(@"alipay3dtouch://platformapi/startapp?appId=20000056&src=3dtouch"); });
+    TARegister(infoClass, @"cn.actions.alipaycode", @"支付宝收付款", @"qrcode",            ^(id c) { TAOpenURL(@"alipay3dtouch://platformapi/startapp?appId=20000056&src=3dtouch"); });
     TARegister(infoClass, @"cn.actions.wake",       @"唤醒屏幕",   @"sun.max.fill",      ^(id c) { TAWake(); });
     TARegister(infoClass, @"cn.actions.dismisssiri",@"关闭Siri",   @"mic.slash.fill",    ^(id c) { TADismissSiri(); });
     TARegister(infoClass, @"cn.actions.back",       @"返回上级",   @"arrow.uturn.backward", ^(id c) { notify_post(TA_BACK_NOT); });
