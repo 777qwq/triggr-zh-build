@@ -109,14 +109,15 @@ static void TAPromptPassword(void) {
     });
 }
 
-// cn4 semantics, copied from TGPerform: everything runs on the MAIN queue
-// (libtriggr's handler thread is not guaranteed main; the SB wake/unlock
-// calls silently fail off-main). Trigger = always unlock; popup only when
-// no password has been set yet.
+// cn4 semantics: the ACTION always just unlocks (main thread — libtriggr's
+// handler thread is not guaranteed main, and the SB wake/unlock calls
+// silently fail off-main). Password CONFIG happens when the 密码解锁 row is
+// tapped in the action picker (see picker swizzle below), like cn4.9's
+// settings row. No password stored -> do nothing.
 static void TAUnlockAction(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *pw = TALoadPassword();
-        if (pw.length) TAUnlockDevice(pw); else TAPromptPassword();
+        if (pw.length) TAUnlockDevice(pw);
     });
 }
 
@@ -175,6 +176,41 @@ static void TAPruneStaleRegistrations(void) {
     notify_post("com.johndie.triggr/registry-changed");
 }
 
+// ---- picker row-tap hook: tapping 密码解锁 in the action picker opens the
+// cn4.9 config dialog (pre-filled, 取消/保存/移除), like the cn4.9 settings row.
+static void TAPickerDidSelectIMP(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    // original (exchanged) implementation
+    ((void (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(self, @selector(tg_didSelectRowAtIndexPath:), tv, ip);
+    @try {
+        UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+        if (!cell) return;
+        __block NSString *text = nil;
+        // custom cells possible: sweep labels in the cell
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:cell];
+        while (stack.count && !text) {
+            UIView *v = stack.lastObject; [stack removeLastObject];
+            for (UIView *sub in v.subviews) [stack addObject:sub];
+            if ([v isKindOfClass:[UILabel class]]) {
+                UILabel *l = (UILabel *)v;
+                if ([l.text isEqualToString:@"密码解锁"]) { text = l.text; break; }
+            }
+        }
+        if (text) TAPromptPassword();
+    } @catch (NSException *e) { }
+}
+
+static void TASwizzlePickerRowTap(void) {
+    Class picker = NSClassFromString(@"TGActionPickerController");
+    if (!picker) return;
+    SEL orig = @selector(tableView:didSelectRowAtIndexPath:);
+    if (!class_getInstanceMethod(picker, orig)) return; // picker not a table delegate: skip silently
+    SEL ours = @selector(tg_didSelectRowAtIndexPath:);
+    if (!class_addMethod(picker, ours, (IMP)TAPickerDidSelectIMP, "v@:@@")) return;
+    Method m1 = class_getInstanceMethod(picker, orig);
+    Method m2 = class_getInstanceMethod(picker, ours);
+    if (m1 && m2) method_exchangeImplementations(m1, m2);
+}
+
 static void TARegister(Class infoClass, NSString *identifier, NSString *title, NSString *symbol, void (^handler)(id ctx)) {
     id info = [[infoClass alloc] init];
     [info setValue:identifier forKey:@"identifier"];
@@ -210,6 +246,7 @@ static void TAInit(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         TAPruneStaleRegistrations();
         TARegisterAll();
+        TASwizzlePickerRowTap();
         if (++tries < 10 && !NSClassFromString(@"TGActionInfo"))
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ TARegisterAll(); });
     });
