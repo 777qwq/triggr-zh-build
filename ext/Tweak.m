@@ -109,19 +109,11 @@ static void TAPromptPassword(void) {
     });
 }
 
-// cn4 semantics: locked -> auto-unlock with the stored passcode (no UI);
-// unlocked -> config popup (cn4.9 style, pre-filled + 移除).
+// cn4.9 semantics: the trigger ALWAYS unlocks with the stored passcode
+// (screen on or off, never shows UI). Popup only when no password yet.
 static void TAUnlockAction(void) {
-    BOOL locked = YES;
-    id mgr = TAShared(@"SBLockScreenManager");
-    if (mgr && [mgr respondsToSelector:@selector(isUserLocked)])
-        locked = ((BOOL (*)(id, SEL))objc_msgSend)(mgr, @selector(isUserLocked));
-    if (locked) {
-        NSString *pw = TALoadPassword();
-        if (pw.length) TAUnlockDevice(pw); else TAPromptPassword();
-    } else {
-        TAPromptPassword();
-    }
+    NSString *pw = TALoadPassword();
+    if (pw.length) TAUnlockDevice(pw); else TAPromptPassword();
 }
 
 // [cn4.9 verified] transient haptic (触觉反馈 = light). Main thread only.
