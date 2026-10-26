@@ -1,0 +1,5 @@
+#!/bin/sh
+# 装完把已经在跑的 Triggr 杀掉，下次打开就是汉化后的界面
+killall -9 TriggrApp >/dev/null 2>&1
+[ -x /var/jb/usr/bin/killall ] && /var/jb/usr/bin/killall -9 TriggrApp >/dev/null 2>&1
+exit 0
