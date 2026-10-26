@@ -78,28 +78,106 @@ static void TASavePassword(NSString *pw) {
     chmod(TAPrefPath().fileSystemRepresentation, 0600);
 }
 
-// Popup to set the passcode (cn4-style 弹窗设置密码, on the SB key window).
+// cn4.9 promptForCommand-style popup (verbatim style): pre-filled existing
+// value, 取消/保存/移除(destructive, only when something is stored).
 static void TAPromptPassword(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = UIApplication.sharedApplication.keyWindow;
         if (!window) for (UIWindow *w in UIApplication.sharedApplication.windows) { if (w.isKeyWindow) { window = w; break; } }
         if (!window) return;
+        NSString *existing = TALoadPassword();
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"密码解锁"
-            message:@"输入设备的锁屏密码，存储在本机，用于锁屏状态下自动解锁"
+            message:@"设备的锁屏密码，存储在本机，用于锁屏状态下自动解锁"
             preferredStyle:UIAlertControllerStyleAlert];
-        [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-            tf.placeholder = @"锁屏密码"; tf.secureTextEntry = YES; tf.keyboardType = UIKeyboardTypeNumberPad;
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+            field.text = existing ?: @"";
+            field.autocorrectionType = UITextAutocorrectionTypeNo;
+            field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+            field.clearButtonMode = UITextFieldViewModeWhileEditing;
         }];
-        [alert addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            NSString *pw = alert.textFields.firstObject.text;
-            if (pw.length) { TASavePassword(pw); TAUnlockDevice(pw); }
-        }]];
         [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        __weak UIAlertController *weakAlert = alert;
+        [alert addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            NSString *text = [weakAlert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (text.length) TASavePassword(text);
+        }]];
+        if (existing.length)
+            [alert addAction:[UIAlertAction actionWithTitle:@"移除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+                [[NSFileManager defaultManager] removeItemAtPath:TAPrefPath() error:nil];
+            }]];
         [window.rootViewController presentViewController:alert animated:YES completion:nil];
     });
 }
 
+// cn4 semantics: locked -> auto-unlock with the stored passcode (no UI);
+// unlocked -> config popup (cn4.9 style, pre-filled + 移除).
+static void TAUnlockAction(void) {
+    BOOL locked = YES;
+    id mgr = TAShared(@"SBLockScreenManager");
+    if (mgr && [mgr respondsToSelector:@selector(isUserLocked)])
+        locked = ((BOOL (*)(id, SEL))objc_msgSend)(mgr, @selector(isUserLocked));
+    if (locked) {
+        NSString *pw = TALoadPassword();
+        if (pw.length) TAUnlockDevice(pw); else TAPromptPassword();
+    } else {
+        TAPromptPassword();
+    }
+}
+
+// [cn4.9 verified] transient haptic (触觉反馈 = light). Main thread only.
+static void TAHaptic(double intensity, double sharpness) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        static CHHapticEngine *engine;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            if (![[CHHapticEngine capabilitiesForHardware] supportsHaptics]) return;
+            NSError *err = nil;
+            engine = [[CHHapticEngine alloc] initAndReturnError:&err];
+            if (engine) engine.autoShutdownEnabled = YES;
+        });
+        if (!engine) { [[UISelectionFeedbackGenerator new] selectionChanged]; return; }
+        NSError *err = nil;
+        if (![engine startAndReturnError:&err]) { [[UISelectionFeedbackGenerator new] selectionChanged]; return; }
+        CHHapticEvent *event = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticTransient parameters:@[
+            [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:(float)intensity],
+            [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:(float)sharpness]
+        ] relativeTime:0];
+        CHHapticPattern *pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:&err];
+        id<CHHapticPatternPlayer> player = pattern ? [engine createPlayerWithPattern:pattern error:&err] : nil;
+        if (![player startAtTime:0 error:&err]) [[UISelectionFeedbackGenerator new] selectionChanged];
+    });
+}
+
 // ---- libtriggr registration (begonecia pattern: dlopen + NSClassFromString + KVC) ----
+
+// Prune stale registrations (removed actions) from registry.plist at any
+// nesting depth: {Actions|Triggers: {registrar: {identifier: info}}}.
+// Only OUR identifiers are ever touched, so a generic recursive prune is safe.
+static NSDictionary *TAPruneDict(NSDictionary *d, NSSet *stale, BOOL *dirty) {
+    NSMutableDictionary *out = [d mutableCopy];
+    for (NSString *key in d.allKeys) {
+        id child = d[key];
+        if ([stale containsObject:key]) { [out removeObjectForKey:key]; *dirty = YES; continue; }
+        if ([child isKindOfClass:[NSDictionary class]]) out[key] = TAPruneDict(child, stale, dirty);
+    }
+    return out;
+}
+
+static void TAPruneStaleRegistrations(void) {
+    NSString *path = @"/var/mobile/Library/Triggr/registry.plist";
+    NSDictionary *root = [NSDictionary dictionaryWithContentsOfFile:path];
+    if (!root) return;
+    NSSet *stale = [NSSet setWithArray:@[
+        @"cn.actions.screenrecord",
+        @"cn.actions.vibrate.light", @"cn.actions.vibrate.medium", @"cn.actions.vibrate.heavy",
+        @"cn.actions.unlock.set",
+    ]];
+    BOOL dirty = NO;
+    NSDictionary *pruned = TAPruneDict(root, stale, &dirty);
+    if (!dirty) return;
+    [pruned writeToFile:path atomically:YES];
+    notify_post("com.johndie.triggr/registry-changed");
+}
 
 static void TARegister(Class infoClass, NSString *identifier, NSString *title, NSString *symbol, void (^handler)(id ctx)) {
     id info = [[infoClass alloc] init];
@@ -124,11 +202,8 @@ static void TARegisterAll(void) {
     TARegister(infoClass, @"cn.actions.wake",       @"唤醒屏幕",   @"sun.max.fill",      ^(id c) { TAWake(); });
     TARegister(infoClass, @"cn.actions.dismisssiri",@"关闭Siri",   @"mic.slash.fill",    ^(id c) { TADismissSiri(); });
     TARegister(infoClass, @"cn.actions.back",       @"返回上级",   @"arrow.uturn.backward", ^(id c) { notify_post(TA_BACK_NOT); });
-    TARegister(infoClass, @"cn.actions.unlock",     @"密码解锁",   @"lock.open",         ^(id c) {
-        NSString *pw = TALoadPassword();
-        if (pw.length) TAUnlockDevice(pw); else TAPromptPassword();
-    });
-    TARegister(infoClass, @"cn.actions.unlock.set", @"设置解锁密码", @"lock.rotation",   ^(id c) { TAPromptPassword(); });
+    TARegister(infoClass, @"cn.actions.haptic",     @"触觉反馈",   @"waveform",          ^(id c) { TAHaptic(0.35, 0.7); });
+    TARegister(infoClass, @"cn.actions.unlock",     @"密码解锁",   @"lock.open",         ^(id c) { TAUnlockAction(); });
 }
 
 __attribute__((constructor))
@@ -137,6 +212,7 @@ static void TAInit(void) {
     // Triggr dylib may load after ours; retry on main queue until libtriggr is up.
     __block int tries = 0;
     dispatch_async(dispatch_get_main_queue(), ^{
+        TAPruneStaleRegistrations();
         TARegisterAll();
         if (++tries < 10 && !NSClassFromString(@"TGActionInfo"))
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ TARegisterAll(); });
