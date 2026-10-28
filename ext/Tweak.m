@@ -161,6 +161,49 @@ static void TAHaptic(double intensity, double sharpness) {
     });
 }
 
+// ---- 个人热点开/关（cn4.9 配方：MISManager，官方接口标准用法注册） ----
+// MISManager 在 WirelessModemSettings.bundle 里，SpringBoard 不链接，手动 dlopen。
+// getState:andReason: 位 0 = 开关态；setState: 0x3FF=开 0x3FE=关；已在目标态不重写；
+// 首次 setState 常不生效，3 秒后复查重试。主线程直调（仅非主线程才跳板）。
+static void TAHotspotDlopen(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PreferenceBundles/WirelessModemSettings.bundle/WirelessModemSettings", RTLD_LAZY);
+        if (!h) dlopen("/System/Library/PreferenceBundles/WirelessModemSettings.bundle/WirelessModemSettings/WirelessModemSettings", RTLD_LAZY);
+    });
+}
+
+static void TAHotspotSet(BOOL on) { // on=YES 开 / NO 关
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ TAHotspotSet(on); });
+        return;
+    }
+    TALog([NSString stringWithFormat:@"hotspot: handler entered on=%d", on ? 1 : 0]);
+    @try {
+        TAHotspotDlopen();
+        Class mcls = objc_getClass("MISManager");
+        if (!mcls || ![mcls respondsToSelector:@selector(sharedManager)]) { TALog(@"hotspot: MISManager/sharedManager missing"); return; }
+        id m = ((id (*)(id, SEL))objc_msgSend)(mcls, @selector(sharedManager));
+        SEL gs = sel_registerName("getState:andReason:"), ss = sel_registerName("setState:");
+        if (!m || ![m respondsToSelector:gs] || ![m respondsToSelector:ss]) { TALog(@"hotspot: manager/selectors missing"); return; }
+        int state = 0, reason = 0;
+        ((void (*)(id, SEL, int *, int *))objc_msgSend)(m, gs, &state, &reason);
+        if ((state & 1) == (on ? 1 : 0)) { TALog([NSString stringWithFormat:@"hotspot: already %d, no-op", on ? 1 : 0]); return; } // cn4.9 守卫
+        ((void (*)(id, SEL, int))objc_msgSend)(m, ss, on ? 0x3ff : 0x3fe);
+        TALog([NSString stringWithFormat:@"hotspot: set on=%d state=0x%x", on ? 1 : 0, state]);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            int s2 = 0, r2 = 0;
+            ((void (*)(id, SEL, int *, int *))objc_msgSend)(m, gs, &s2, &r2);
+            if ((s2 & 1) != (on ? 1 : 0)) {
+                ((void (*)(id, SEL, int))objc_msgSend)(m, ss, on ? 0x3ff : 0x3fe);
+                TALog(@"hotspot: retry sent");
+            }
+        });
+    } @catch (NSException *e) {
+        TALog([NSString stringWithFormat:@"hotspot EXC %@", e]);
+    }
+}
+
 // ---- libtriggr registration (begonecia pattern: dlopen + NSClassFromString + KVC) ----
 
 // Prune stale registrations (removed actions) from registry.plist at any
@@ -184,6 +227,9 @@ static void TAPruneStaleRegistrations(void) {
         @"cn.actions.screenrecord",
         @"cn.actions.vibrate.light", @"cn.actions.vibrate.medium", @"cn.actions.vibrate.heavy",
         @"cn.actions.unlock.set",
+        @"cn.actions.hotspot", @"cn.actions.ping",
+        @"toggle.cn.actions.hotspot", @"on.cn.actions.hotspot", @"off.cn.actions.hotspot",
+        @"cn.actions.hotspot.toggle",
     ]];
     BOOL dirty = NO;
     NSDictionary *pruned = TAPruneDict(root, stale, &dirty);
@@ -267,6 +313,8 @@ static void TARegisterAll(void) {
     TARegister(infoClass, @"cn.actions.back",       @"返回上级",   @"arrow.uturn.backward", ^(id c) { notify_post(TA_BACK_NOT); });
     TARegister(infoClass, @"cn.actions.haptic",     @"触觉反馈",   @"waveform",          ^(id c) { TAHaptic(0.35, 0.7); });
     TARegister(infoClass, @"cn.actions.unlock",     @"密码解锁",   @"lock.open",         ^(id c) { TAUnlockAction(); });
+    TARegister(infoClass, @"cn.actions.hotspot.on",  @"个人热点开启", @"personalhotspot", ^(id c) { TAHotspotSet(YES); });
+    TARegister(infoClass, @"cn.actions.hotspot.off", @"个人热点关闭", @"personalhotspot", ^(id c) { TAHotspotSet(NO);  });
 }
 
 __attribute__((constructor))
