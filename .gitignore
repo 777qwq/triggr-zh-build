@@ -5,3 +5,4 @@ ci/out/
 build/var/jb/Library/MobileSubstrate/DynamicLibraries/*.dylib
 
 .DS_Store
+!releases/*.deb
