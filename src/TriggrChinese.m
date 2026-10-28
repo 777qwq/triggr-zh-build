@@ -7,26 +7,6 @@
 
 #import "dict.h"
 
-// ---- 最小日志（写到 /var/tmp/triggrzh.log，沙盒外可读） ----
-extern int open(const char *path, int oflag, ...);
-extern long write(int fd, const void *buf, unsigned long n);
-extern int close(int fd);
-extern unsigned long strlen(const char *s);
-#define TG_O_WRONLY 0x0001
-#define TG_O_CREAT  0x0200
-#define TG_O_APPEND 0x0008
-static int gLogBudget = 150;
-
-static void TGLog(NSString *line) {
-    if (!line) return;
-    int fd = open("/var/tmp/triggrzh.log", TG_O_WRONLY | TG_O_CREAT | TG_O_APPEND, 0644);
-    if (fd < 0) return;
-    const char *c = [line UTF8String];
-    if (c) write(fd, c, strlen(c));
-    write(fd, "\n", 1);
-    close(fd);
-}
-
 static NSString *TGCut(NSString *s) {
     if (s.length <= 48) return s;
     return [s substringToIndex:48];
@@ -423,11 +403,6 @@ static NSString *TGTranslateC(NSString *s, id ctx, const void *caller) {
             NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             if (t.length && t.length != s.length) hit = TGTr(t);
         }
-    }
-    if (gLogBudget > 0) {
-        gLogBudget--;
-        TGLog([NSString stringWithFormat:@"%@ | %@ | %@",
-               hit ? @"HIT" : (ok ? @"MISS" : @"SKIP"), TGCut(s), hit ? TGCut(hit) : @"-"]);
     }
     return hit ? hit : s;
 }
@@ -836,10 +811,6 @@ static void TGChineseInit(void) {
     BOOL s18 = TGSwizzle([UITextView class], @selector(setText:), @selector(tg_setText:));
     BOOL s19 = TGSwizzle([UITextView class], @selector(setAttributedText:), @selector(tg_setAttributedText:));
 
-    TGLog([NSString stringWithFormat:@"=== init v15 %@ prose=%lu words=%lu prefix=%lu fmt=%lu long=%lu sw=%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d",
-           bid, (unsigned long)gProse.count, (unsigned long)gWords.count,
-           (unsigned long)gPrefixes.count, (unsigned long)gFormats.count, (unsigned long)gLongProse.count,
-           s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19]);
 }
 
 // 双保险：老式 __mod_init_func 路径（+load 已经兜过底，这里会直接返回）

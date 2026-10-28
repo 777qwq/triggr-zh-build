@@ -1,9 +1,40 @@
-// TriggrActions - register custom actions in Triggr 2.0 via libtriggr
-// SpringBoard only. No hooks; registers actions through libtriggr's public API
-// (usage verified against Jond-ie/begonecia Tweak.xm, API surface from
-// official Triggr 2.0.0-beta3 libtriggr.dylib strings).
-// Action implementations ported verbatim from our proven 1.5.0+cn line.
-
+// TriggrActions — 第三方动作接入 Triggr 2.0（libtriggr 官方接口标准用法）
+//
+// ══ 官方接口速查（完整声明见 Triggr 2.0 deb 内 /var/jb/usr/include/triggr/Triggr.h）══
+// 链接方式：dlopen("/var/jb/usr/lib/libtriggr.dylib") 或弱链接；先查 TGTriggrAvailable()
+// 等价检查：NSClassFromString(@"TGTriggr") 响应 @selector(shared)
+//
+// TGTriggr（[TGTriggr shared] 单例）仅 4 方法：
+//   registerTrigger:(TGTriggerInfo *)            注册触发器
+//   registerAction:(TGActionInfo *)handler:(void(^)(TGActionContext *))  注册动作
+//   isTriggerAssigned:(NSString *)identifier     该触发器当前有无指派（省电判断用）
+//   sendTrigger:(NSString *)identifier           主动触发（任意进程可发，SB 内执行）
+// TGActionInfo 属性（KVC setValue:forKey:）：
+//   identifier / title / group / symbolName / footer / places
+// TGActionContext（handler 入参）：
+//   triggerIdentifier / frontmostApp / locked
+//
+// ⚠ 运行模型：
+//   动作在「注册它的进程」内运行——SB tweak 注册的动作在 SpringBoard 内执行。
+//   SB 外进程的动作改用 Extensions plist（/Library/Triggr/Extensions，声明式）。
+//   触发时引擎按 identifier 到 libtriggr 内存 map 查 handler，查不到=静默失败（无任何日志）。
+//
+// ⚠ identifier 禁忌（实测 2.0.0-beta9）：
+//   toggle. / on. / off. 前缀是引擎原生开关的命名空间（Flipswitch 约定），
+//   第三方用此类前缀会被引擎劫持进原生开关表——查无此开关则静默跳过，
+//   永远不会调到你的 handler。第三方动作一律用自有前缀 + 动词后缀：
+//   例：cn.actions.hotspot.on / cn.actions.hotspot.off
+//
+// ⚠ 注册时序：tweak 在 ctor 里 dispatch_async(main) 注册即可（本文件 TAInit 的
+//   retry 循环处理 libtriggr 晚于本 dylib 加载的情况）。
+// ⚠ registry.plist（/var/mobile/Library/Triggr/registry.plist）是 libtriggr 维护的
+//   注册元数据，picker 从它读动作列表；移除动作时按 identifier 递归剔除并发
+//   com.johndie.triggr/registry-changed 通知（见 TAPruneStaleRegistrations）。
+//
+// 本文件动作：微信扫一扫/收付款、支付宝扫一扫/收付款、唤醒屏幕、关闭Siri、
+// 返回上级、触觉反馈、密码解锁、个人热点开启/关闭（cn.actions.hotspot.on/off，
+// 后缀式 id；MISManager 执行体见 TAHotspotSet）。
+//
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -18,20 +49,6 @@
 
 #define TA_GROUP    @"扩展动作"
 #define TA_BACK_NOT "cn.triggr2.back"
-
-// ---- one-line file log (diagnostics; view at /var/tmp/ta.log) ----
-static void TALog(NSString *line) {
-    if (!line) return;
-    @try {
-        NSMutableString *out = [NSMutableString stringWithFormat:@"[%@] %@\n", [NSDate date], line];
-        int fd = open("/var/tmp/ta.log", O_WRONLY | O_CREAT | O_APPEND, 0777);
-        if (fd >= 0) {
-            const char *c = out.UTF8String;
-            if (c) write(fd, c, strlen(c));
-            close(fd);
-        }
-    } @catch (NSException *e) { }
-}
 
 static id TAShared(NSString *cls) {
     Class c = NSClassFromString(cls);
@@ -178,29 +195,25 @@ static void TAHotspotSet(BOOL on) { // on=YES 开 / NO 关
         dispatch_async(dispatch_get_main_queue(), ^{ TAHotspotSet(on); });
         return;
     }
-    TALog([NSString stringWithFormat:@"hotspot: handler entered on=%d", on ? 1 : 0]);
     @try {
         TAHotspotDlopen();
         Class mcls = objc_getClass("MISManager");
-        if (!mcls || ![mcls respondsToSelector:@selector(sharedManager)]) { TALog(@"hotspot: MISManager/sharedManager missing"); return; }
+        if (!mcls || ![mcls respondsToSelector:@selector(sharedManager)]) { ; return; }
         id m = ((id (*)(id, SEL))objc_msgSend)(mcls, @selector(sharedManager));
         SEL gs = sel_registerName("getState:andReason:"), ss = sel_registerName("setState:");
-        if (!m || ![m respondsToSelector:gs] || ![m respondsToSelector:ss]) { TALog(@"hotspot: manager/selectors missing"); return; }
+        if (!m || ![m respondsToSelector:gs] || ![m respondsToSelector:ss]) { ; return; }
         int state = 0, reason = 0;
         ((void (*)(id, SEL, int *, int *))objc_msgSend)(m, gs, &state, &reason);
-        if ((state & 1) == (on ? 1 : 0)) { TALog([NSString stringWithFormat:@"hotspot: already %d, no-op", on ? 1 : 0]); return; } // cn4.9 守卫
+        if ((state & 1) == (on ? 1 : 0)) { ; return; } // cn4.9 守卫
         ((void (*)(id, SEL, int))objc_msgSend)(m, ss, on ? 0x3ff : 0x3fe);
-        TALog([NSString stringWithFormat:@"hotspot: set on=%d state=0x%x", on ? 1 : 0, state]);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             int s2 = 0, r2 = 0;
             ((void (*)(id, SEL, int *, int *))objc_msgSend)(m, gs, &s2, &r2);
             if ((s2 & 1) != (on ? 1 : 0)) {
                 ((void (*)(id, SEL, int))objc_msgSend)(m, ss, on ? 0x3ff : 0x3fe);
-                TALog(@"hotspot: retry sent");
             }
         });
     } @catch (NSException *e) {
-        TALog([NSString stringWithFormat:@"hotspot EXC %@", e]);
     }
 }
 
@@ -248,9 +261,6 @@ static void TAPickerDidSelectIMP(id self, SEL _cmd, UITableView *tv, NSIndexPath
     NSString *hit = nil;
     @try {
         UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-        TALog([NSString stringWithFormat:@"didSelect(pre) ip=%@ cell=%@ text=%@ detail=%@",
-              ip, cell ? NSStringFromClass(cell.class) : @"nil",
-              cell.textLabel.text, cell.detailTextLabel.text]);
         if (cell) {
             NSMutableArray *stack = [NSMutableArray arrayWithObject:cell];
             while (stack.count && !hit) {
@@ -262,8 +272,7 @@ static void TAPickerDidSelectIMP(id self, SEL _cmd, UITableView *tv, NSIndexPath
                 }
             }
         }
-        TALog([NSString stringWithFormat:@"  pre-match=%@", hit ?: @"<none>"]);
-    } @catch (NSException *e) { TALog([NSString stringWithFormat:@"pre EXC %@", e]); }
+    } @catch (NSException *e) { ; }
 
     if (tgOrigDidSelect) ((void (*)(id, SEL, UITableView *, NSIndexPath *))tgOrigDidSelect)(self, _cmd, tv, ip);
 
@@ -272,11 +281,11 @@ static void TAPickerDidSelectIMP(id self, SEL _cmd, UITableView *tv, NSIndexPath
 
 static void TASwizzlePickerRowTap(void) {
     Class picker = NSClassFromString(@"TGActionPickerController");
-    if (!picker) { TALog(@"swizzle: TGActionPickerController nil"); return; }
+    if (!picker) { ; return; }
     SEL orig = @selector(tableView:didSelectRowAtIndexPath:);
     Method m1 = class_getInstanceMethod(picker, orig);
-    if (!m1) { TALog([NSString stringWithFormat:@"swizzle: class=%@ no didSelect", picker]); return; }
-    if (tgOrigDidSelect) { TALog(@"swizzle: already hooked"); return; }
+    if (!m1) { ; return; }
+    if (tgOrigDidSelect) { ; return; }
     tgOrigDidSelect = method_getImplementation(m1);
     // Override on the SUBCLASS only. Never method_exchangeImplementations here:
     // if the picker inherits didSelect from UITableViewController, swapping the
@@ -285,7 +294,6 @@ static void TASwizzlePickerRowTap(void) {
         // picker implements it locally; replace just this class's IMP
         method_setImplementation(m1, (IMP)TAPickerDidSelectIMP);
     }
-    TALog(@"swizzle: OK (subclass override)");
 }
 
 static void TARegister(Class infoClass, NSString *identifier, NSString *title, NSString *symbol, void (^handler)(id ctx)) {
@@ -333,13 +341,11 @@ static void TAInit(void) {
     // TriggrApp (2.0 app is a shell that loads Triggr.bundle) and Settings.app:
     // hook the picker when Triggr.bundle loads (event-driven, no polling).
     if (strstr(getprogname(), "Preferences") || strstr(getprogname(), "TriggrApp")) {
-        TALog([NSString stringWithFormat:@"ctor: %s path", getprogname()]);
         dispatch_async(dispatch_get_main_queue(), ^{
             TASwizzlePickerRowTap(); // in case the panel is already open
             [[NSNotificationCenter defaultCenter] addObserverForName:NSBundleDidLoadNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
                 id bundle = note.object;
                 NSString *bundlePath = [bundle isKindOfClass:[NSBundle class]] ? [(NSBundle *)bundle bundlePath] : nil;
-                TALog([NSString stringWithFormat:@"bundleDidLoad %@", bundlePath]);
                 if (bundlePath.length && [bundlePath containsString:@"Triggr"]) TASwizzlePickerRowTap();
             }];
         });
